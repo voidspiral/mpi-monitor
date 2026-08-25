@@ -1,0 +1,20 @@
+schema: spec-driven
+
+context: |
+  Standalone HPC MPI process monitor (this repo), not ClusterHelm and not nodestat.
+  Tech stack: Python 3.10+, stdlib first; matplotlib optional for PNG plots.
+  TDD: write failing tests before implementation (unittest).
+  design.md body stays English. Propose-stage replies include a Chinese translation of design.md.
+  No hardcoded user home paths (/home/smt, /home/cn1, …). Config and CLI flags only.
+  Compute nodes may lack a deployed copy of this package; remote sampling uses an inline payload.
+  Neighbor repos for context only: ClusterHelm (job orchestration) and nodestat (node heartbeat snapshots).
+
+rules:
+  proposal:
+    - Always include a "Non-goals" section
+  design:
+    - Keep the design.md body in English
+    - Record TDD as the implementation method
+  tasks:
+    - Order work as failing tests first, then implementation
+    - Break tasks into chunks of max 2 hours
