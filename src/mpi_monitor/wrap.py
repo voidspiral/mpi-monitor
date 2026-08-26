@@ -45,6 +45,43 @@ def make_run_id(*, now: datetime | None = None, pid: int | None = None) -> str:
     return now.strftime("%Y%m%dT%H%M%SZ") + f"-{pid}"
 
 
+def write_clusterhelm_incident(
+    *,
+    step: str,
+    hosts: Sequence[str],
+    exit_code: int,
+    command: Sequence[str],
+    detail_tail: str = "",
+    extra: dict[str, Any] | None = None,
+) -> Path | None:
+    """Write ClusterHelm job sidecar when wrap fails. No-op without env."""
+    raw = os.environ.get("CLUSTERHELM_INCIDENT_PATH", "").strip()
+    if raw:
+        dest = Path(raw)
+    else:
+        job_dir = os.environ.get("AGENT_JOB_DIR", "").strip()
+        job_id = os.environ.get("AGENT_JOB_ID", "").strip()
+        if not job_dir or not job_id:
+            return None
+        dest = Path(job_dir) / f"{job_id}.incident.json"
+    record: dict[str, Any] = {
+        "step": step,
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "hosts": list(hosts),
+        "exit_code": exit_code,
+        "command": list(command),
+        "detail_tail": (detail_tail or "")[-2000:],
+        "source": "mpi-monitor",
+    }
+    if extra:
+        record.update(extra)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(dest)
+    return dest
+
+
 def write_meta(run_dir: Path, data: dict[str, Any]) -> None:
     path = run_dir / "meta.json"
     existing: dict[str, Any] = {}
@@ -373,4 +410,16 @@ def wrap(
             "collect_errors": errors,
         },
     )
+    if exit_code != 0:
+        detail = f"exit_code={exit_code}"
+        if errors:
+            detail += " collect_errors=" + json.dumps(errors)
+        write_clusterhelm_incident(
+            step="wrap",
+            hosts=hosts,
+            exit_code=exit_code,
+            command=command,
+            detail_tail=detail,
+            extra={"match": match, "run_id": run_id},
+        )
     return exit_code

@@ -8,6 +8,8 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "src"))
 
 
+import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -90,6 +92,68 @@ class TestWrapHosts(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("cn2", ssh_calls)
         tmp.cleanup()
+
+    def test_nonzero_exit_writes_incident_sidecar(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        inc = Path(tmp.name) / "job.incident.json"
+        previous = os.environ.get("CLUSTERHELM_INCIDENT_PATH")
+        os.environ["CLUSTERHELM_INCIDENT_PATH"] = str(inc)
+        try:
+            code = wrap(
+                ["mpirun", "-np", "2", "is.W.x"],
+                hosts=["cn1", "cn2"],
+                match="is.W.x",
+                output_dir=Path(tmp.name) / "out",
+                local_host="cn1",
+                run_command=lambda _c: 255,
+                spawn_local=lambda **_k: _DoneHandle(),
+                ssh_run=lambda host, command, **kwargs: subprocess.CompletedProcess(
+                    ["ssh"], 0, stdout="", stderr=""
+                ),
+                plot=False,
+                join_timeout=0.2,
+            )
+            self.assertEqual(code, 255)
+            data = json.loads(inc.read_text())
+            self.assertEqual(data["step"], "wrap")
+            self.assertEqual(data["exit_code"], 255)
+            self.assertEqual(data["source"], "mpi-monitor")
+            self.assertEqual(data["hosts"], ["cn1", "cn2"])
+        finally:
+            if previous is None:
+                os.environ.pop("CLUSTERHELM_INCIDENT_PATH", None)
+            else:
+                os.environ["CLUSTERHELM_INCIDENT_PATH"] = previous
+            tmp.cleanup()
+
+    def test_zero_exit_does_not_write_incident(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        inc = Path(tmp.name) / "job.incident.json"
+        previous = os.environ.get("CLUSTERHELM_INCIDENT_PATH")
+        os.environ["CLUSTERHELM_INCIDENT_PATH"] = str(inc)
+        try:
+            code = wrap(
+                ["true"],
+                hosts=["cn1"],
+                match="job",
+                output_dir=Path(tmp.name) / "out",
+                local_host="cn1",
+                run_command=lambda _c: 0,
+                spawn_local=lambda **_k: _DoneHandle(),
+                ssh_run=lambda host, command, **kwargs: subprocess.CompletedProcess(
+                    ["ssh"], 0, stdout="", stderr=""
+                ),
+                plot=False,
+                join_timeout=0.2,
+            )
+            self.assertEqual(code, 0)
+            self.assertFalse(inc.is_file())
+        finally:
+            if previous is None:
+                os.environ.pop("CLUSTERHELM_INCIDENT_PATH", None)
+            else:
+                os.environ["CLUSTERHELM_INCIDENT_PATH"] = previous
+            tmp.cleanup()
 
 
 if __name__ == "__main__":
