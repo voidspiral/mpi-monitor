@@ -93,6 +93,38 @@ class TestWrapHosts(unittest.TestCase):
         self.assertIn("cn2", ssh_calls)
         tmp.cleanup()
 
+    def test_remote_start_detaches_ssh_session(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        commands: list[str] = []
+
+        def spawn_local(**kwargs):
+            raise AssertionError("should not spawn local")
+
+        def ssh_run(host, command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(["ssh"], 0, stdout="", stderr="")
+
+        code = wrap(
+            ["true"],
+            hosts=["cn2"],
+            match="job",
+            output_dir=Path(tmp.name),
+            local_host="cn1",
+            run_command=lambda _c: 0,
+            spawn_local=spawn_local,
+            ssh_run=ssh_run,
+            plot=False,
+            join_timeout=0.2,
+            run_id="run-detach",
+        )
+        self.assertEqual(code, 0)
+        start = next(c for c in commands if "setsid bash -c" in c)
+        self.assertIn("(setsid bash -c", start)
+        self.assertIn("</dev/null &)", start)
+        self.assertIn("echo OK", start)
+        self.assertNotIn("nohup", start)
+        tmp.cleanup()
+
     def test_nonzero_exit_writes_incident_sidecar(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         inc = Path(tmp.name) / "job.incident.json"

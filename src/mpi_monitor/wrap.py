@@ -155,7 +155,7 @@ def default_ssh_run(
     identity: str | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    ssh = ["ssh", "-T", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
     if identity:
         ssh += ["-i", identity]
     target = f"{user}@{host}" if user else host
@@ -241,9 +241,18 @@ def _start_remote_collector(
             str(ready_timeout),
         ]
     )
-    # background collect on remote; stdout discarded
-    start = f"{mkdir} && nohup {payload} >/dev/null 2>{shlex.quote(remote_root + '/collect.err')} &"
-    ssh_run(host, start, user=user, identity=identity, timeout=ready_timeout)
+    # Background in a subshell so the SSH login shell can exit. Do not use
+    # nohup here: on this cluster `nohup ... &` keeps the SSH session open.
+    # setsid + closed stdio is enough for the collector to survive hangup.
+    start = (
+        f"{mkdir} && (setsid bash -c {shlex.quote(payload)} "
+        f">/dev/null 2>{shlex.quote(remote_root + '/collect.err')} </dev/null &)"
+        f" && echo OK"
+    )
+    result = ssh_run(host, start, user=user, identity=identity, timeout=ready_timeout)
+    if getattr(result, "returncode", 0) not in (0, None):
+        detail = (getattr(result, "stderr", None) or getattr(result, "stdout", None) or "").strip()
+        raise RuntimeError(detail or f"ssh start collector failed: {result.returncode}")
     handle = SshCollectorHandle(
         host,
         remote_root,

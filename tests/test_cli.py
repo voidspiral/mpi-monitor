@@ -53,9 +53,12 @@ class TestCli(unittest.TestCase):
         out = Path(tmp.name)
         host = socket.gethostname().split(".")[0]
         marker = f"MPI_MONITOR_WRAP_{os.getpid()}"
-        py = (
-            f"import time, sys; sys.argv[0]={marker!r}; time.sleep(0.35); raise SystemExit(7)"
+        script = Path(tmp.name) / marker
+        script.write_text(
+            "#!/usr/bin/env python3\nimport time, sys\ntime.sleep(0.35)\nsys.exit(7)\n",
+            encoding="utf-8",
         )
+        script.chmod(0o755)
         code = main(
             [
                 "wrap",
@@ -72,9 +75,7 @@ class TestCli(unittest.TestCase):
                 "--ready-timeout",
                 "2",
                 "--",
-                "python3",
-                "-c",
-                py,
+                str(script),
             ]
         )
         self.assertEqual(code, 7)

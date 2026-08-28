@@ -33,17 +33,23 @@ file; the implementation MUST NOT hardcode user home directories or hostnames.
 - **THEN** the CLI SHALL fail with a non-zero exit and an error on stderr instead of inventing a host list
 
 ### Requirement: Process discovery matches cmdline and excludes helpers
-On each host the collector SHALL select processes whose command line contains
-the caller-supplied match string, and MUST exclude MPI launchers, daemons, sshd,
-and the collector process itself.
+On each host the collector SHALL select processes whose **executable** (comm
+or argv0) contains the caller-supplied match string, and MUST exclude MPI
+launchers, daemons, sshd, the SSH client used to start collectors, and the
+collector process itself. A match that appears only in later argv (for example
+`wrap --match is.S.x` or `mpirun ... is.S.x`) MUST NOT select that process.
 
 #### Scenario: Rank binary is selected
 - **WHEN** a host has `is.S.x` and `mpirun` processes
 - **THEN** only the `is.S.x` pid is sampled when match is `is.S.x`
 
 #### Scenario: Launcher processes are excluded
-- **WHEN** cmdline contains `mpirun`, `mpiexec`, `orted`, `orterun`, `prted`, `prterun`, `sshd`, or `hydra_pmi_proxy`
+- **WHEN** cmdline contains `mpirun`, `mpiexec`, `orted`, `orterun`, `prted`, `prterun`, `sshd`, `ssh`, or `hydra_pmi_proxy`
 - **THEN** that pid MUST NOT be sampled even if the match string also appears
+
+#### Scenario: Wrap and collect argv are not sampled
+- **WHEN** a python wrap/collect process or an `ssh` helper has `--match is.S.x` in later argv, and a rank binary `is.S.x` is also running
+- **THEN** only the rank binary pid is sampled
 
 ### Requirement: Optional MPI rank from process environment
 When a matched process exposes a known rank environment variable, each sample
