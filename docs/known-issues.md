@@ -1,7 +1,20 @@
 # Known issues
 
 Recorded 2026-08-26 from ClusterHelm test partition and cn[1-3] wrap of NPB /
-`mpi_loop.x`.
+`mpi_loop.x`. Hard-gate / job-JSON mistakes seen in gateway agent logs
+2026-08-28.
+
+## CLI hard gate / job JSON — fixed
+
+Reproduced on cn1 agent logs (`job-20260828T001848Z-1931`, `…4144`):
+
+1. `"$MPI_MON"` when `MPI_MON="env PYTHONPATH=… python3 -m mpi_monitor"` →
+   `No such file or directory`. Fix: `scripts/probe-cli.sh` (bash array) or
+   `python3 -m mpi_monitor probe`.
+2. Ad-hoc `finalize.py` opened
+   `{AGENT_JOB_DIR}/{job_id}/{job_id}.json` (extra directory) →
+   `FileNotFoundError`. Real file is `{AGENT_JOB_DIR}/{job_id}.json`.
+   Print it with `python3 -m mpi_monitor job-json`.
 
 ## wrap SSH sidecar timeout — fixed
 

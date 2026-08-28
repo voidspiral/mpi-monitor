@@ -61,6 +61,9 @@ Each JSONL line includes `ts`, `host`, `pid`, `cpu_pct`, `rss_mb`,
 mpi-monitor collect --match BIN --output-dir DIR --stop-file FILE --host HOST
 mpi-monitor plot --run-dir DIR
 mpi-monitor remote-cmd -- collect --match BIN --output-dir DIR --stop-file FILE --host HOST
+mpi-monitor probe
+mpi-monitor job-json          # {AGENT_JOB_DIR}/{AGENT_JOB_ID}.json (not nested)
+bash scripts/probe-cli.sh     # hard gate; uses argv array, never "$MPI_MON"
 ```
 
 `remote-cmd` prints a `base64 | python3` one-liner for nodes that do not have

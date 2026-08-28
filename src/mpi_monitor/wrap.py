@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from mpi_monitor.clusterhelm import incident_path_from_env
 from mpi_monitor.plot import plot_run
 from mpi_monitor.remote import remote_cmd
 
@@ -55,15 +56,9 @@ def write_clusterhelm_incident(
     extra: dict[str, Any] | None = None,
 ) -> Path | None:
     """Write ClusterHelm job sidecar when wrap fails. No-op without env."""
-    raw = os.environ.get("CLUSTERHELM_INCIDENT_PATH", "").strip()
-    if raw:
-        dest = Path(raw)
-    else:
-        job_dir = os.environ.get("AGENT_JOB_DIR", "").strip()
-        job_id = os.environ.get("AGENT_JOB_ID", "").strip()
-        if not job_dir or not job_id:
-            return None
-        dest = Path(job_dir) / f"{job_id}.incident.json"
+    dest = incident_path_from_env()
+    if dest is None:
+        return None
     record: dict[str, Any] = {
         "step": step,
         "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
