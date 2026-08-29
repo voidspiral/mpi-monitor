@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import base64
+import io
 import os
 import shlex
 import socket
 import subprocess
 import sys
+import tarfile
 import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
@@ -150,59 +153,21 @@ def default_ssh_run(
     identity: str | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    ssh = ["ssh", "-T", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    connect_timeout = 10 if timeout is None else max(1, int(timeout - 2))
+    ssh = [
+        "ssh",
+        "-T",
+        "-n",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={connect_timeout}",
+    ]
     if identity:
         ssh += ["-i", identity]
     target = f"{user}@{host}" if user else host
     ssh += [target, remote_command]
     return subprocess.run(ssh, capture_output=True, text=True, timeout=timeout)
-
-
-class SshCollectorHandle:
-    def __init__(
-        self,
-        host: str,
-        remote_root: str,
-        ssh_run: SshRun,
-        *,
-        user: str | None,
-        identity: str | None,
-        join_timeout: float,
-    ) -> None:
-        self.host = host
-        self.remote_root = remote_root
-        self.ssh_run = ssh_run
-        self.user = user
-        self.identity = identity
-        self.join_timeout = join_timeout
-        self._done = False
-
-    def _ssh(self, command: str, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
-        return self.ssh_run(
-            self.host,
-            command,
-            user=self.user,
-            identity=self.identity,
-            timeout=timeout,
-        )
-
-    def wait(self, timeout: float | None = None) -> int | None:
-        if self._done:
-            return 0
-        limit = self.join_timeout if timeout is None else timeout
-        self._ssh(
-            f"touch {shlex.quote(self.remote_root + '/stop')}",
-            timeout=limit,
-        )
-        self._done = True
-        return 0
-
-    def kill(self) -> None:
-        self._ssh(
-            f"touch {shlex.quote(self.remote_root + '/stop')}",
-            timeout=self.join_timeout,
-        )
-        self._done = True
 
 
 def _start_remote_collector(
@@ -215,8 +180,7 @@ def _start_remote_collector(
     ssh_run: SshRun,
     user: str | None,
     identity: str | None,
-    join_timeout: float,
-) -> tuple[CollectorHandle, str]:
+) -> str:
     remote_root = f"/tmp/mpi-monitor/{run_id}/{host}"
     mkdir = f"mkdir -p {shlex.quote(remote_root + '/series')}"
     payload = remote_cmd(
@@ -241,25 +205,56 @@ def _start_remote_collector(
     # setsid + closed stdio is enough for the collector to survive hangup.
     start = (
         f"{mkdir} && (setsid bash -c {shlex.quote(payload)} "
-        f">/dev/null 2>{shlex.quote(remote_root + '/collect.err')} </dev/null &)"
+        f">/dev/null 2>{shlex.quote(remote_root + '/collect.err')} </dev/null & "
+        f"echo $! >{shlex.quote(remote_root + '/collector.pid')})"
         f" && echo OK"
     )
     result = ssh_run(host, start, user=user, identity=identity, timeout=ready_timeout)
     if getattr(result, "returncode", 0) not in (0, None):
         detail = (getattr(result, "stderr", None) or getattr(result, "stdout", None) or "").strip()
         raise RuntimeError(detail or f"ssh start collector failed: {result.returncode}")
-    handle = SshCollectorHandle(
-        host,
-        remote_root,
-        ssh_run,
-        user=user,
-        identity=identity,
-        join_timeout=join_timeout,
+    return remote_root
+
+
+def _remote_finalize_command(remote_root: str) -> str:
+    root = shlex.quote(remote_root)
+    stop = shlex.quote(remote_root + "/stop")
+    pid_file = shlex.quote(remote_root + "/collector.pid")
+    return (
+        f"touch {stop}; "
+        f"pid=$(cat {pid_file} 2>/dev/null || true); "
+        "if [ -n \"$pid\" ]; then "
+        "i=0; while kill -0 \"$pid\" 2>/dev/null && [ \"$i\" -lt 50 ]; "
+        "do sleep 0.1; i=$((i+1)); done; fi; "
+        f"tar -C {root} -cf - series collect.err 2>/dev/null | base64 | tr -d '\\n'"
     )
-    return handle, remote_root
 
 
-def _fetch_remote_series(
+def _extract_remote_archive(
+    encoded: str,
+    dest_series: Path,
+    *,
+    host: str,
+) -> None:
+    if not encoded.strip():
+        return
+    payload = base64.b64decode(encoded.strip(), validate=True)
+    dest_series.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
+        for member in archive.getmembers():
+            path = Path(member.name)
+            if not member.isfile():
+                continue
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                continue
+            if len(path.parts) == 2 and path.parts[0] == "series" and path.suffix == ".jsonl":
+                (dest_series / path.name).write_bytes(extracted.read())
+            elif path.name == "collect.err" and len(path.parts) == 1:
+                (dest_series.parent / f"{host}.collect.err").write_bytes(extracted.read())
+
+
+def _finalize_remote_series(
     host: str,
     remote_root: str,
     dest_series: Path,
@@ -269,25 +264,28 @@ def _fetch_remote_series(
     identity: str | None,
     timeout: float,
 ) -> None:
-    dest_series.mkdir(parents=True, exist_ok=True)
-    listed = ssh_run(
-        host,
-        f"ls {shlex.quote(remote_root + '/series')} 2>/dev/null || true",
-        user=user,
-        identity=identity,
-        timeout=timeout,
-    )
-    names = [n for n in listed.stdout.split() if n.endswith(".jsonl")]
-    for name in names:
-        cat = ssh_run(
-            host,
-            f"cat {shlex.quote(remote_root + '/series/' + name)}",
-            user=user,
-            identity=identity,
-            timeout=timeout,
-        )
-        if cat.returncode == 0 and cat.stdout:
-            (dest_series / name).write_text(cat.stdout, encoding="utf-8")
+    command = _remote_finalize_command(remote_root)
+    failures: list[str] = []
+    for attempt, attempt_timeout in enumerate((timeout, max(timeout + 2, timeout * 2)), 1):
+        try:
+            result = ssh_run(
+                host,
+                command,
+                user=user,
+                identity=identity,
+                timeout=attempt_timeout,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    (result.stderr or result.stdout or f"ssh exit {result.returncode}").strip()
+                )
+            _extract_remote_archive(result.stdout, dest_series, host=host)
+            return
+        except Exception as exc:
+            failures.append(f"attempt {attempt}: {exc}")
+            if attempt == 1:
+                time.sleep(min(0.2, max(0.0, timeout)))
+    raise RuntimeError("; ".join(failures))
 
 
 def join_collectors(handles: Sequence[CollectorHandle], join_timeout: float) -> None:
@@ -295,14 +293,18 @@ def join_collectors(handles: Sequence[CollectorHandle], join_timeout: float) -> 
     for handle in handles:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            handle.kill()
+            try:
+                handle.kill()
+            except Exception:
+                pass
             continue
         try:
             handle.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            handle.kill()
         except Exception:
-            handle.kill()
+            try:
+                handle.kill()
+            except Exception:
+                pass
 
 
 def wrap(
@@ -364,7 +366,7 @@ def wrap(
                     )
                 )
             else:
-                handle, remote_root = _start_remote_collector(
+                remote_root = _start_remote_collector(
                     host,
                     run_id=run_id,
                     match=match,
@@ -373,9 +375,7 @@ def wrap(
                     ssh_run=ssh_run,
                     user=ssh_user,
                     identity=ssh_identity,
-                    join_timeout=join_timeout,
                 )
-                handles.append(handle)
                 remote_roots[host] = remote_root
         except Exception as exc:
             errors[host] = str(exc)
@@ -389,32 +389,38 @@ def wrap(
     stop_file.touch()
     join_collectors(handles, join_timeout)
 
-    for host, remote_root in remote_roots.items():
-        try:
-            _fetch_remote_series(
-                host,
-                remote_root,
-                run_dir / "series",
-                ssh_run,
-                user=ssh_user,
-                identity=ssh_identity,
-                timeout=join_timeout,
-            )
-        except Exception as exc:
-            errors[host] = str(exc)
+    try:
+        for host, remote_root in remote_roots.items():
+            try:
+                _finalize_remote_series(
+                    host,
+                    remote_root,
+                    run_dir / "series",
+                    ssh_run,
+                    user=ssh_user,
+                    identity=ssh_identity,
+                    timeout=join_timeout,
+                )
+            except Exception as exc:
+                errors[host] = str(exc)
 
-    if plot:
-        plot_run(run_dir, run_id=run_id)
-
-    write_meta(
-        run_dir,
-        {
-            "ended_at": datetime.now(timezone.utc).isoformat(),
-            "exit_code": exit_code,
-            "collect_errors": errors,
-        },
-    )
-    if exit_code != 0:
+        if plot:
+            try:
+                plot_run(run_dir, run_id=run_id)
+            except Exception as exc:
+                errors["plot"] = str(exc)
+    finally:
+        write_meta(
+            run_dir,
+            {
+                "ended_at": datetime.now(timezone.utc).isoformat(),
+                "exit_code": exit_code,
+                "application_exit_code": exit_code,
+                "collection_status": "complete" if not errors else "partial",
+                "collect_errors": errors,
+            },
+        )
+    if exit_code != 0 or errors:
         detail = f"exit_code={exit_code}"
         if errors:
             detail += " collect_errors=" + json.dumps(errors)
@@ -424,6 +430,12 @@ def wrap(
             exit_code=exit_code,
             command=command,
             detail_tail=detail,
-            extra={"match": match, "run_id": run_id},
+            extra={
+                "match": match,
+                "run_id": run_id,
+                "reason_code": (
+                    "wrapped_command_failed" if exit_code != 0 else "collection_incomplete"
+                ),
+            },
         )
     return exit_code
