@@ -13,10 +13,15 @@ EXCLUDE_COMM = {
     "prted",
     "prterun",
     "sshd",
+    "ssh",
     "hydra_pmi_proxy",
 }
 
 RANK_ENV_KEYS = ("PMIX_RANK", "OMPI_COMM_WORLD_RANK", "PMI_RANK")
+
+# argv1 may be the script when argv0 is an interpreter (shebang).
+_INTERPRETER_NAMES = {"bash", "sh", "dash", "perl", "ruby"}
+_INTERPRETER_SKIP_NEXT = {"-c", "-m"}
 
 
 @dataclass(frozen=True)
@@ -70,8 +75,34 @@ def should_exclude(comm: str, pid: int, collector_pid: int | None) -> bool:
     return comm in EXCLUDE_COMM
 
 
-def cmdline_matches(cmdline: str, match: str) -> bool:
-    return match in cmdline
+def _exe_basename(token: str) -> str:
+    return token.rsplit("/", 1)[-1]
+
+
+def _is_interpreter(token: str) -> bool:
+    name = _exe_basename(token)
+    return name.startswith("python") or name in _INTERPRETER_NAMES
+
+
+def cmdline_matches(cmdline: str, match: str, comm: str = "") -> bool:
+    """Match the rank executable (comm, argv0, or shebang argv1), not later argv."""
+    if not match:
+        return False
+    if comm and match in comm:
+        return True
+    tokens = cmdline.split()
+    if not tokens:
+        return False
+    if match in tokens[0]:
+        return True
+    if (
+        len(tokens) >= 2
+        and _is_interpreter(tokens[0])
+        and tokens[1] not in _INTERPRETER_SKIP_NEXT
+        and match in tokens[1]
+    ):
+        return True
+    return False
 
 
 def discover(
@@ -91,7 +122,7 @@ def discover(
             continue
         if should_exclude(comm, pid, collector_pid):
             continue
-        if not cmdline_matches(cmdline, match):
+        if not cmdline_matches(cmdline, match, comm):
             continue
         found.append(
             ProcInfo(pid=pid, comm=comm, cmdline=cmdline, rank=read_rank(entry))

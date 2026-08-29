@@ -7,6 +7,7 @@ import socket
 import sys
 from pathlib import Path
 
+from mpi_monitor.clusterhelm import job_json_path
 from mpi_monitor.collect import run_collect
 from mpi_monitor.plot import plot_run
 from mpi_monitor.remote import remote_cmd
@@ -36,6 +37,13 @@ def build_parser() -> argparse.ArgumentParser:
     wrap_p.add_argument("--join-timeout", type=float, default=5.0)
     wrap_p.add_argument("--ssh-user")
     wrap_p.add_argument("--ssh-identity")
+    wrap_p.add_argument("--run-id")
+    wrap_p.add_argument(
+        "--plot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="generate per-process PNG charts (default: enabled)",
+    )
     wrap_p.add_argument("command", nargs=argparse.REMAINDER)
 
     collect_p = sub.add_parser("collect", help="node-local collector")
@@ -46,6 +54,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     remote_p = sub.add_parser("remote-cmd", help="print an inline collector payload")
     remote_p.add_argument("remote_argv", nargs=argparse.REMAINDER)
+
+    sub.add_parser("probe", help="CLI hard gate: succeed if this package can run")
+
+    job_p = sub.add_parser(
+        "job-json",
+        help="print ClusterHelm job JSON path ({AGENT_JOB_DIR}/{id}.json, not nested)",
+    )
+    job_p.add_argument(
+        "--require",
+        action="store_true",
+        help="exit 2 if the file does not exist",
+    )
 
     return parser
 
@@ -76,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
             join_timeout=args.join_timeout,
             ssh_user=args.ssh_user,
             ssh_identity=args.ssh_identity,
+            run_id=args.run_id,
+            plot=args.plot,
         )
 
     if args.cmd == "collect":
@@ -98,6 +120,22 @@ def main(argv: list[str] | None = None) -> int:
         if extra and extra[0] == "--":
             extra = extra[1:]
         print(remote_cmd(extra or None))
+        return 0
+
+    if args.cmd == "probe":
+        print("ok")
+        return 0
+
+    if args.cmd == "job-json":
+        try:
+            path = job_json_path()
+        except ValueError as exc:
+            print(f"mpi-monitor job-json: {exc}", file=sys.stderr)
+            return 2
+        if args.require and not path.is_file():
+            print(f"mpi-monitor job-json: not found: {path}", file=sys.stderr)
+            return 2
+        print(path)
         return 0
 
     parser.error(f"unknown command {args.cmd}")

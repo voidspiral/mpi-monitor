@@ -53,9 +53,12 @@ class TestCli(unittest.TestCase):
         out = Path(tmp.name)
         host = socket.gethostname().split(".")[0]
         marker = f"MPI_MONITOR_WRAP_{os.getpid()}"
-        py = (
-            f"import time, sys; sys.argv[0]={marker!r}; time.sleep(0.35); raise SystemExit(7)"
+        script = Path(tmp.name) / marker
+        script.write_text(
+            "#!/usr/bin/env python3\nimport time, sys\ntime.sleep(0.35)\nsys.exit(7)\n",
+            encoding="utf-8",
         )
+        script.chmod(0o755)
         code = main(
             [
                 "wrap",
@@ -72,9 +75,7 @@ class TestCli(unittest.TestCase):
                 "--ready-timeout",
                 "2",
                 "--",
-                "python3",
-                "-c",
-                py,
+                str(script),
             ]
         )
         self.assertEqual(code, 7)
@@ -86,6 +87,28 @@ class TestCli(unittest.TestCase):
         for key in ("ts", "host", "pid", "cpu_pct", "rss_mb", "io_read_bps", "io_write_bps"):
             self.assertIn(key, row)
         tmp.cleanup()
+
+    def test_wrap_accepts_explicit_run_id_and_no_plot(self) -> None:
+        with mock.patch("mpi_monitor.cli.wrap", return_value=0) as wrapped:
+            code = main(
+                [
+                    "wrap",
+                    "--hosts",
+                    "cn1",
+                    "--match",
+                    "job",
+                    "--output-dir",
+                    "/tmp/out",
+                    "--run-id",
+                    "fixed-run",
+                    "--no-plot",
+                    "--",
+                    "true",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(wrapped.call_args.kwargs["run_id"], "fixed-run")
+        self.assertFalse(wrapped.call_args.kwargs["plot"])
 
 
 if __name__ == "__main__":

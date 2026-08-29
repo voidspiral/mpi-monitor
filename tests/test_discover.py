@@ -61,6 +61,41 @@ class TestDiscover(unittest.TestCase):
         found = discover(self.root, "is.S.x", collector_pid=50)
         self.assertEqual([p.pid for p in found], [51])
 
+    def test_match_is_executable_not_later_argv(self) -> None:
+        _write_proc(
+            self.root,
+            10,
+            "python3",
+            "python3 -m mpi_monitor wrap --match is.S.x -- mpirun /home/NPB/bin/is.S.x",
+        )
+        _write_proc(
+            self.root,
+            11,
+            "python3",
+            "python3 - collect --match is.S.x --output-dir /tmp/x",
+        )
+        _write_proc(self.root, 12, "ssh", "ssh cn2 python3 - collect --match is.S.x")
+        _write_proc(self.root, 9, "is.S.x", "/home/NPB/bin/is.S.x arg")
+        found = discover(self.root, "is.S.x", collector_pid=1)
+        self.assertEqual([p.pid for p in found], [9])
+
+    def test_shebang_script_matches_argv1(self) -> None:
+        marker = "MPI_MONITOR_WRAP_1"
+        _write_proc(
+            self.root,
+            9,
+            "python3",
+            f"/usr/bin/python3 /tmp/{marker}",
+        )
+        _write_proc(
+            self.root,
+            10,
+            "python3",
+            f"python3 -m mpi_monitor wrap --match {marker} -- /tmp/{marker}",
+        )
+        found = discover(self.root, marker, collector_pid=1)
+        self.assertEqual([p.pid for p in found], [9])
+
 
 if __name__ == "__main__":
     unittest.main()

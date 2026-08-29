@@ -75,6 +75,9 @@ JSONL 每行至少包含：`ts`、`host`、`pid`、`cpu_pct`、`rss_mb`、`io_re
 mpi-monitor collect --match BIN --output-dir DIR --stop-file FILE --host HOST
 mpi-monitor plot --run-dir DIR
 mpi-monitor remote-cmd -- collect --match BIN --output-dir DIR --stop-file FILE --host HOST
+mpi-monitor probe
+mpi-monitor job-json          # {AGENT_JOB_DIR}/{AGENT_JOB_ID}.json（不是再套一层目录）
+bash scripts/probe-cli.sh     # 硬门禁；用 argv 数组，不要 "$MPI_MON"
 ```
 
 `remote-cmd` 打印一条 `base64 | python3` 命令，给未安装本包的计算节点用。
