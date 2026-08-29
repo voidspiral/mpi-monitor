@@ -88,6 +88,28 @@ class TestCli(unittest.TestCase):
             self.assertIn(key, row)
         tmp.cleanup()
 
+    def test_wrap_accepts_explicit_run_id_and_no_plot(self) -> None:
+        with mock.patch("mpi_monitor.cli.wrap", return_value=0) as wrapped:
+            code = main(
+                [
+                    "wrap",
+                    "--hosts",
+                    "cn1",
+                    "--match",
+                    "job",
+                    "--output-dir",
+                    "/tmp/out",
+                    "--run-id",
+                    "fixed-run",
+                    "--no-plot",
+                    "--",
+                    "true",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(wrapped.call_args.kwargs["run_id"], "fixed-run")
+        self.assertFalse(wrapped.call_args.kwargs["plot"])
+
 
 if __name__ == "__main__":
     unittest.main()

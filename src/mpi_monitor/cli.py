@@ -37,6 +37,13 @@ def build_parser() -> argparse.ArgumentParser:
     wrap_p.add_argument("--join-timeout", type=float, default=5.0)
     wrap_p.add_argument("--ssh-user")
     wrap_p.add_argument("--ssh-identity")
+    wrap_p.add_argument("--run-id")
+    wrap_p.add_argument(
+        "--plot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="generate per-process PNG charts (default: enabled)",
+    )
     wrap_p.add_argument("command", nargs=argparse.REMAINDER)
 
     collect_p = sub.add_parser("collect", help="node-local collector")
@@ -89,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
             join_timeout=args.join_timeout,
             ssh_user=args.ssh_user,
             ssh_identity=args.ssh_identity,
+            run_id=args.run_id,
+            plot=args.plot,
         )
 
     if args.cmd == "collect":
