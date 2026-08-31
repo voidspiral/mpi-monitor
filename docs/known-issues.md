@@ -39,8 +39,27 @@ on the remote node; they keep scanning `/proc` until killed.
 `--match is.S.x` and `mpirun ... is.S.x` are no longer sampled. `ssh` is in
 the launcher exclude list.
 
+## wrap serial SSH + join-timeout connect budget — fixed
+
+Reproduced on cn1 wrapping `is.S.x` (NPB kernel 0.3–0.6s): three-host wrap
+wall clock **~59s**. Start/finalize ran host-by-host. Finalize used
+`--join-timeout` (default 5s) as the SSH outer timeout and set
+`ConnectTimeout=join_timeout-2` (3s). cn2/cn3 SSH often takes 3–19s, so
+`touch stop` never ran; wrap then retried 10s per host (**30s** of timeouts).
+
+Now:
+
+- Remote start and finalize run **concurrently** (`ThreadPoolExecutor`).
+- SSH `ConnectTimeout` is always **10s**. Outer timeout is at least
+  `connect + 2` (finalize uses `max(join_timeout, 15)`).
+- Finalize is `touch stop; kill $pid; tar | base64` — no `while kill -0; sleep
+  0.1` loop that ate the whole 5s SSH budget.
+
+`--join-timeout` still bounds local collector join. Slow fetch stays
+`collection_status=partial`.
+
 ## `ready_timeout` is also the SSH start timeout
 
-Still the same CLI flag. After the detach fix, SSH should return immediately,
-so this no longer delays `mpirun`. If SSH itself is slow (WSL proxy), raise
-`--ready-timeout`.
+Still the same CLI flag for the start SSH outer timeout. ConnectTimeout is no
+longer derived from it. After the detach fix, start should return after one
+SSH RTT. If SSH itself is slow (WSL proxy), raise `--ready-timeout`.
