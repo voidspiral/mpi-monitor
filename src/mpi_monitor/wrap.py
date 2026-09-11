@@ -13,6 +13,7 @@ import sys
 import tarfile
 import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -20,6 +21,8 @@ from typing import Any, Protocol
 from mpi_monitor.clusterhelm import incident_path_from_env
 from mpi_monitor.plot import plot_run
 from mpi_monitor.remote import remote_cmd
+
+SSH_CONNECT_TIMEOUT = 10
 
 
 class CollectorHandle(Protocol):
@@ -153,7 +156,8 @@ def default_ssh_run(
     identity: str | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    connect_timeout = 10 if timeout is None else max(1, int(timeout - 2))
+    connect_timeout = SSH_CONNECT_TIMEOUT
+    outer = timeout if timeout is None else max(float(timeout), connect_timeout + 2)
     ssh = [
         "ssh",
         "-T",
@@ -167,7 +171,7 @@ def default_ssh_run(
         ssh += ["-i", identity]
     target = f"{user}@{host}" if user else host
     ssh += [target, remote_command]
-    return subprocess.run(ssh, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(ssh, capture_output=True, text=True, timeout=outer)
 
 
 def _start_remote_collector(
@@ -223,9 +227,7 @@ def _remote_finalize_command(remote_root: str) -> str:
     return (
         f"touch {stop}; "
         f"pid=$(cat {pid_file} 2>/dev/null || true); "
-        "if [ -n \"$pid\" ]; then "
-        "i=0; while kill -0 \"$pid\" 2>/dev/null && [ \"$i\" -lt 50 ]; "
-        "do sleep 0.1; i=$((i+1)); done; fi; "
+        'if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi; '
         f"tar -C {root} -cf - series collect.err 2>/dev/null | base64 | tr -d '\\n'"
     )
 
@@ -352,21 +354,29 @@ def wrap(
     handles: list[CollectorHandle] = []
     remote_roots: dict[str, str] = {}
     errors: dict[str, str] = {}
+    remote_hosts = [host for host in hosts if not is_local_host(host, local_host)]
     for host in hosts:
+        if not is_local_host(host, local_host):
+            continue
         try:
-            if is_local_host(host, local_host):
-                handles.append(
-                    spawn_local(
-                        match=match,
-                        output_dir=run_dir,
-                        stop_file=stop_file,
-                        interval=interval,
-                        host=host.split(".")[0],
-                        ready_timeout=ready_timeout,
-                    )
+            handles.append(
+                spawn_local(
+                    match=match,
+                    output_dir=run_dir,
+                    stop_file=stop_file,
+                    interval=interval,
+                    host=host.split(".")[0],
+                    ready_timeout=ready_timeout,
                 )
-            else:
-                remote_root = _start_remote_collector(
+            )
+        except Exception as exc:
+            errors[host] = str(exc)
+            print(f"mpi-monitor: collect error on {host}: {exc}", file=sys.stderr)
+    if remote_hosts:
+        with ThreadPoolExecutor(max_workers=max(1, len(remote_hosts))) as pool:
+            futs = {
+                pool.submit(
+                    _start_remote_collector,
                     host,
                     run_id=run_id,
                     match=match,
@@ -375,11 +385,16 @@ def wrap(
                     ssh_run=ssh_run,
                     user=ssh_user,
                     identity=ssh_identity,
-                )
-                remote_roots[host] = remote_root
-        except Exception as exc:
-            errors[host] = str(exc)
-            print(f"mpi-monitor: collect error on {host}: {exc}", file=sys.stderr)
+                ): host
+                for host in remote_hosts
+            }
+            for fut in as_completed(futs):
+                host = futs[fut]
+                try:
+                    remote_roots[host] = fut.result()
+                except Exception as exc:
+                    errors[host] = str(exc)
+                    print(f"mpi-monitor: collect error on {host}: {exc}", file=sys.stderr)
 
     try:
         exit_code = run_command(command)
@@ -390,19 +405,28 @@ def wrap(
     join_collectors(handles, join_timeout)
 
     try:
-        for host, remote_root in remote_roots.items():
-            try:
-                _finalize_remote_series(
-                    host,
-                    remote_root,
-                    run_dir / "series",
-                    ssh_run,
-                    user=ssh_user,
-                    identity=ssh_identity,
-                    timeout=join_timeout,
-                )
-            except Exception as exc:
-                errors[host] = str(exc)
+        if remote_roots:
+            finalize_timeout = max(join_timeout, SSH_CONNECT_TIMEOUT + 5)
+            with ThreadPoolExecutor(max_workers=max(1, len(remote_roots))) as pool:
+                futs = {
+                    pool.submit(
+                        _finalize_remote_series,
+                        host,
+                        remote_root,
+                        run_dir / "series",
+                        ssh_run,
+                        user=ssh_user,
+                        identity=ssh_identity,
+                        timeout=finalize_timeout,
+                    ): host
+                    for host, remote_root in remote_roots.items()
+                }
+                for fut in as_completed(futs):
+                    host = futs[fut]
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        errors[host] = str(exc)
 
         if plot:
             try:

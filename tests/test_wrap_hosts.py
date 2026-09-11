@@ -15,10 +15,12 @@ import os
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
-from mpi_monitor.wrap import default_ssh_run, is_local_host, wrap
+from mpi_monitor.wrap import _remote_finalize_command, default_ssh_run, is_local_host, wrap
 
 
 class _DoneHandle:
@@ -211,8 +213,96 @@ class TestWrapHosts(unittest.TestCase):
             run.return_value = subprocess.CompletedProcess(["ssh"], 0, "", "")
             default_ssh_run("cn2", "true", timeout=5)
         argv = run.call_args.args[0]
-        connect = int(argv[argv.index("ConnectTimeout=3")].split("=", 1)[1])
-        self.assertLess(connect, run.call_args.kwargs["timeout"])
+        connect_arg = next(a for a in argv if a.startswith("ConnectTimeout="))
+        connect = int(connect_arg.split("=", 1)[1])
+        self.assertEqual(connect, 10)
+        self.assertGreaterEqual(run.call_args.kwargs["timeout"], 12)
+
+    def test_finalize_kills_instead_of_pid_wait_loop(self) -> None:
+        command = _remote_finalize_command("/tmp/mpi-monitor/run/cn2")
+        self.assertIn("touch ", command)
+        self.assertIn("kill ", command)
+        self.assertIn("tar -C", command)
+        self.assertIn("base64", command)
+        self.assertNotIn("while kill -0", command)
+        self.assertNotIn("sleep 0.1", command)
+
+    def test_remote_start_and_finalize_are_concurrent(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        lock = threading.Lock()
+        calls: list[tuple[str, str]] = []
+
+        def ssh_run(host, command, **kwargs):
+            kind = "start" if "setsid bash -c" in command else "finalize"
+            time.sleep(0.3)
+            with lock:
+                calls.append((host, kind))
+            stdout = self._series_archive(f"{host}_pid1.jsonl") if "base64" in command else "OK\n"
+            return subprocess.CompletedProcess(["ssh"], 0, stdout=stdout, stderr="")
+
+        def spawn_local(**kwargs):
+            raise AssertionError("should not spawn local")
+
+        started = time.monotonic()
+        code = wrap(
+            ["true"],
+            hosts=["cn2", "cn3"],
+            match="job",
+            output_dir=Path(tmp.name),
+            local_host="cn1",
+            run_command=lambda _c: 0,
+            spawn_local=spawn_local,
+            ssh_run=ssh_run,
+            plot=False,
+            join_timeout=5,
+            run_id="run-parallel",
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(code, 0)
+        self.assertLess(elapsed, 0.8)
+        self.assertEqual(
+            {(host, kind) for host, kind in calls},
+            {("cn2", "start"), ("cn3", "start"), ("cn2", "finalize"), ("cn3", "finalize")},
+        )
+        tmp.cleanup()
+
+    def test_one_remote_finalize_failure_is_isolated(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+
+        def ssh_run(host, command, **kwargs):
+            if "setsid bash -c" in command:
+                return subprocess.CompletedProcess(["ssh"], 0, stdout="OK\n", stderr="")
+            if host == "cn2":
+                raise subprocess.TimeoutExpired(["ssh"], kwargs.get("timeout"))
+            return subprocess.CompletedProcess(
+                ["ssh"], 0, stdout=self._series_archive("cn3_pid1.jsonl"), stderr=""
+            )
+
+        def spawn_local(**kwargs):
+            raise AssertionError("should not spawn local")
+
+        code = wrap(
+            ["true"],
+            hosts=["cn2", "cn3"],
+            match="job",
+            output_dir=Path(tmp.name),
+            local_host="cn1",
+            run_command=lambda _c: 0,
+            spawn_local=spawn_local,
+            ssh_run=ssh_run,
+            plot=False,
+            join_timeout=0.01,
+            run_id="run-isolate",
+        )
+        self.assertEqual(code, 0)
+        meta = json.loads((Path(tmp.name) / "run-isolate/meta.json").read_text())
+        self.assertEqual(meta["application_exit_code"], 0)
+        self.assertEqual(meta["collection_status"], "partial")
+        self.assertIn("cn2", meta["collect_errors"])
+        self.assertNotIn("cn3", meta["collect_errors"])
+        self.assertIn("ended_at", meta)
+        self.assertTrue((Path(tmp.name) / "run-isolate/series/cn3_pid1.jsonl").is_file())
+        tmp.cleanup()
 
     def test_nonzero_exit_writes_incident_sidecar(self) -> None:
         tmp = tempfile.TemporaryDirectory()
